@@ -16,8 +16,6 @@ Rust 판은 [AmesianX/codemason](https://github.com/AmesianX/codemason) 에 있�
 > *Provided **as-is**, without warranty of any kind. This tool edits files and executes
 > shell commands under model control. See [LICENSE](LICENSE).*
 
----
-
 터미널에서 도는 코딩 에이전트 CLI. **로컬 LLM**(vLLM / llama.cpp)을 상대로 돌며
 클라우드에 의존하지 않는다.
 
