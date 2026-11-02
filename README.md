@@ -1,5 +1,9 @@
 # codemason (Python)
 
+**codemason 은 같은 구현을 두 언어로 유지한다.** 이 저장소는 **Python 판**이고,
+Rust 판은 [AmesianX/codemason](https://github.com/AmesianX/codemason) 에 있다.
+한쪽을 고치면 다른 쪽에도 반영한다 — 기능과 동작은 서로 맞춰 간다.
+
 > ## ⚠️ 고지 · Disclaimer
 >
 > 이 저장소는 **있는 그대로(as-is)** 공개됩니다. 어떤 보증도 하지 않습니다.
@@ -15,7 +19,7 @@
 ---
 
 터미널에서 도는 코딩 에이전트 CLI. **로컬 LLM**(vLLM / llama.cpp)을 상대로 돌며
-클라우드에 의존하지 않는다. Rust 포팅판은 [AmesianX/codemason](https://github.com/AmesianX/codemason).
+클라우드에 의존하지 않는다.
 
 ```
 148개 .py 파일 / 52,299줄 · 테스트 63개 · Python 3.10+
