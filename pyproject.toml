@@ -1,0 +1,98 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codemason"
+dynamic = ["version"]
+description = "AI-powered coding assistant CLI"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "CodeMason Team"}
+]
+keywords = ["ai", "coding", "assistant", "cli", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = [
+    "httpx>=0.25.0",
+    "prompt-toolkit>=3.0.0",
+    "pydantic>=2.0.0",
+    "tokenizers>=0.20.0",
+    "markdownify>=0.11.0",
+    "ddgs>=9.0.0",
+    "rich>=13.0.0",
+    "pyyaml>=6.0",
+    "cryptography>=42.0.0",
+    "mcp>=1.9",
+    "pillow>=10.0",   # utils/image_prep.py: shrink/tile images before sending to the vision server
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+codemason = "codemason.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/codemason/codemason"
+Documentation = "https://github.com/codemason/codemason#readme"
+Repository = "https://github.com/codemason/codemason"
+Issues = "https://github.com/codemason/codemason/issues"
+
+# Read from codemason/__init__.py -- see the note there. setuptools resolves
+# this statically (the module is a docstring and two literals), so building the
+# wheel does not import the package or its dependencies.
+[tool.setuptools.dynamic]
+version = {attr = "codemason.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["codemason*"]
+
+[tool.setuptools.package-data]
+# Ship the bundled skills (non-.py data) inside the wheel.
+#
+# tokenizer/ must ship too. It decides every token count in the process (the
+# auto-compact threshold, the context-window check, the usage readout), and a
+# missing one does NOT fail loudly — the process falls back to a character
+# heuristic. `pip install -e .` resolves it from the source tree and hides the
+# problem; a wheel built without these globs does not carry it at all.
+codemason = [
+    "skills/*/SKILL.md",
+    "skills/**/*.md",
+    "tokenizer/*/tokenizer.json",
+    "tokenizer/*/tokenizer_config.json",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

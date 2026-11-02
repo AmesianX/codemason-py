@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+/project/
+.claude/
+.codemason/
+
+# local test sandboxes (OCR fixtures, logs, build output)
+test/
+config.desktop.json
+DESKTOP_SETUP.txt
+build/
+dist/
