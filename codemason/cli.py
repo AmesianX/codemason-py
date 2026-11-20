@@ -2747,7 +2747,20 @@ async def _dispatch_builtin(user_input: str, messages: List[Any],
             print(f"Unknown mode: {_want}   (off | on | auto)")
             return 'handled'
         _err = await _ab.set_mode(_mode)
-        print(f"/ab mode: {_mode}" + (f" — server not updated: {_err}" if _err else ""))
+        if _err:
+            print(f"/ab mode: {_mode} — server not updated: {_err}")
+            return 'handled'
+        # Report what the SERVER holds, not what we asked for: "/ab mode: on"
+        # used to print on a push that was silently skipped as already-there,
+        # while the server sat at 0.0 (see services/ab.py).
+        _served = await _ab.query()
+        if _served is None:
+            _line = 'server: no /ab endpoint'
+        else:
+            _scale, _consistent = _served
+            _state = 'on (abliterated)' if _scale > 0 else 'off (restored)'
+            _line = f'server: {_state}' + ('' if _consistent else ' — WORKERS DISAGREE')
+        print(f"/ab mode: {_mode}\n{_line}")
         return 'handled'
 
     if cmd in ('language', 'lang'):

@@ -97,17 +97,26 @@ def _endpoint():
     return base + '/ab', (cfg.model_api_key or '')
 
 
-async def _push(scale):
+async def _push(scale, force=False):
     """Push a scale, skipping the request when the server already has it.
 
     Returns None on success or a message on failure. A failure is reported to
     the caller but never blocks the turn: a server without the plugin (or an
     llama.cpp backend) has no /ab, and that is a normal configuration.
+
+    ``_pushed`` is a memo about state we do not own, and there is no way to
+    invalidate it. It rots two ways: the server restarts (back to
+    GLM53_AB_SCALE=0) or another client pushes, and either way we keep claiming
+    a value the server does not hold. So ``force`` exists for commands the user
+    typed: those must reach the server, never be answered from our guess. The
+    per-request skipping inside ``auto`` stays, because there both pushes are
+    ours and they pair up inside one turn.
     """
     global _pushed
-    with _lock:
-        if _pushed == scale:
-            return None
+    if not force:
+        with _lock:
+            if _pushed == scale:
+                return None
     target = _endpoint()
     if target is None:
         return 'model_base_url is not set'
@@ -121,21 +130,52 @@ async def _push(scale):
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(url, json={'scale': scale}, headers=headers)
         if resp.status_code >= 400:
+            # The push did not land, and we no longer know what the server has.
+            with _lock:
+                _pushed = None
             return f'{resp.status_code}: {resp.text.strip()}'
     except Exception as exc:  # network, DNS, refused — all non-fatal here
+        with _lock:
+            _pushed = None
         return repr(exc)
+    # Believe the server, not ourselves. Our /ab answers with
+    # {"scale":..,"workers":[..],"consistent":bool}; anything else (a different
+    # server, an empty 200) leaves us with no confirmation, so record none and
+    # let the next push go out rather than be skipped.
+    served = None
+    consistent = True
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            if body.get('scale') is not None:
+                served = float(body['scale'])
+            consistent = bool(body.get('consistent', True))
+    except Exception:
+        served = None
     with _lock:
-        _pushed = scale
+        _pushed = served
+    if served is not None and abs(served - scale) > 1e-6:
+        return f'server took {served}, not {scale}'
+    if not consistent:
+        # The tensor-parallel ranks hold different scales, which means the
+        # halves of the model disagree about which weights they are.
+        return 'workers disagree on the scale'
     return None
 
 
 async def set_mode(new_mode):
-    """Set the mode and bring the server in line with it right away."""
+    """Set the mode and bring the server in line with it right away.
+
+    Forced: a command the user typed must reach the server. ``/ab on`` used to
+    be answered out of ``_pushed`` and print "on" without sending a byte, while
+    the server sat at 0.0 — and in ON mode begin_request() returns immediately,
+    so nothing ever pushed 1.0 again. See _push().
+    """
     global _mode
     with _lock:
         _mode = new_mode
     # Leaving auto or turning it off must not strand the server on.
-    return await _push(1.0 if new_mode == ON else 0.0)
+    return await _push(1.0 if new_mode == ON else 0.0, force=True)
 
 
 async def on_user_turn():
@@ -175,9 +215,28 @@ async def end_request(turned_on):
     degenerate guard cut all reach here. That is the point: the previous version
     turned off only on a tool call, which the collapsed turns of 2026-10-01
     never reached (see the module docstring).
+
+    The mode can change while the request is in flight, and this off was armed
+    under the mode that held when it STARTED. ``/ab on`` typed mid-turn pins the
+    edit deliberately; undoing it a moment later, on the strength of a decision
+    the user has since overridden, is how the switch ended up stuck off while
+    the REPL said "on" (2026-11-20)::
+
+        turn in flight       begin_request pushed 1.0
+        user types /ab on    set_mode(ON) -> 1.0, prints "/ab mode: on"
+        turn answers         end_request pushed 0.0   <-- stomps the pin
+        from then on         mode is ON, so begin_request returns False and
+                             NOTHING ever pushes 1.0 again -- every later turn
+                             refuses, under a display that reads "on"
+
+    ``off`` still pushes: parking the server is always safe, and never
+    stranding it on is the point of the pairing.
     """
-    if turned_on:
-        await _push(0.0)
+    if not turned_on:
+        return
+    if mode() == ON:
+        return
+    await _push(0.0)
 
 
 async def query():

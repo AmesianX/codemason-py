@@ -135,6 +135,77 @@ check('parse_mode takes the three modes', (
 ))
 check('parse_mode rejects anything else', ab.parse_mode('maybe') is None)
 
+# --- an explicit mode command is never answered from the cache --------------
+# `_pushed` is a memo about state we do not own and cannot invalidate: the
+# server restarting or another client pushing rots it. With a rotten memo,
+# `/ab on` used to return success without sending a byte and print "on" while
+# the server sat at 0.0 -- and in ON mode begin_request() returns immediately,
+# so nothing ever pushed 1.0 again. Permanently stuck, under an honest-looking
+# display. Plant the rotten belief and require the push anyway.
+seen.clear()
+ab._armed = False
+ab._pushed = 1.0                      # we believe the server is already on
+err = asyncio.run(ab.set_mode(ab.ON))
+check('a user-typed /ab on is sent even when we think it is already on',
+      seen == [1.0] and err is None, (seen, err))
+
+# --- pinning the edit mid-turn survives that turn ending --------------------
+# The off is armed by begin_request() under the mode that held when the request
+# STARTED, and the mode can change while it is in flight. Undoing a pin the
+# user has since asked for is how the switch ended up stuck off while the REPL
+# said "on".
+seen.clear()
+ab._pushed = None
+ab._armed = False
+
+
+async def pin_mid_turn():
+    await ab.set_mode(ab.AUTO)        # parks off
+    await ab.on_user_turn()           # arms
+    on = await ab.begin_request()     # 1.0 -- request now in flight
+    await ab.set_mode(ab.ON)          # user pins it mid-turn
+    await ab.end_request(on)          # must NOT stomp the pin
+    return on
+
+
+pinned = asyncio.run(pin_mid_turn())
+check('pinning on mid-turn survives that turn ending',
+      pinned is True and seen[-1] == 1.0, seen)
+
+# --- the memo records what the server took, not what we asked for -----------
+# A server that answers with a different scale (another client raced us, or it
+# is not our /ab at all) must not leave us believing our own number: the next
+# push would be skipped as already-there.
+lying = []
+
+
+class Lying(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
+        lying.append(body['scale'])
+        payload = json.dumps({'scale': 0.0, 'workers': [0.0, 0.0],
+                              'consistent': True}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        pass
+
+
+liar = HTTPServer(('127.0.0.1', 0), Lying)
+threading.Thread(target=liar.serve_forever, daemon=True).start()
+point_at(liar.server_port)
+err = asyncio.run(ab.set_mode(ab.ON))
+check('a scale the server did not take is reported, not swallowed',
+      err is not None and 'not' in err, err)
+check('the memo holds the server\'s value, not ours', ab._pushed == 0.0, ab._pushed)
+asyncio.run(ab.set_mode(ab.ON))
+check('so the next push is not skipped as already-there', lying == [1.0, 1.0], lying)
+liar.shutdown()
+
 shutdown()
 print('\n' + (f'ALL PASS ({len(results)})' if all(results)
               else f'FAILURES: {results.count(False)} / {len(results)}'))
