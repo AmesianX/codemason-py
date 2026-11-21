@@ -206,6 +206,41 @@ asyncio.run(ab.set_mode(ab.ON))
 check('so the next push is not skipped as already-there', lying == [1.0, 1.0], lying)
 liar.shutdown()
 
+
+# --- reading the server's answer -------------------------------------------
+# The per-token switch split the body into a live scalar that is always 0.0 and
+# a `default_scale` that is what actually gets applied. See ab._effective.
+
+# The live lane's own GET, pasted from 2026-11-21 while the edit was ON.
+check('per-token body reports the default, not the dead scalar',
+      ab._effective({
+          'scale': 0.0, 'workers': [0.0, 0.0], 'consistent': True,
+          'mode': 'original', 'per_token': True, 'buffer_tokens': 9236,
+          'fills': [41329, 41329],
+          'details': [{'scale': 0.0, 'default_scale': 1.0, 'per_token': True},
+                      {'scale': 0.0, 'default_scale': 1.0, 'per_token': True}],
+      }) == (1.0, True))
+
+# The server derives `consistent` from those always-zero scalars, so it says
+# true while the ranks hold different defaults -- at TP=2 that means the halves
+# of the model disagree about which weights they are.
+check('per-token disagreement is caught though the server says consistent',
+      ab._effective({'scale': 0.0, 'consistent': True, 'per_token': True,
+                     'details': [{'default_scale': 1.0},
+                                 {'default_scale': 0.0}]}) == (1.0, False))
+
+# A server from before the per-token change, and the POST reply, carry no
+# `per_token`: the top-level pair is the answer there and must stay so.
+check('legacy body still reads the top-level pair',
+      ab._effective({'scale': 1.0, 'workers': [1.0, 1.0],
+                     'consistent': False, 'mode': 'abliterated'}) == (1.0, False))
+# per_token with the details missing is not something the plugin sends (it adds
+# both or neither), but guessing 0.0 there would be the same mistake again.
+check('per_token without details falls back rather than inventing 0.0',
+      ab._effective({'scale': 1.0, 'per_token': True}) == (1.0, True))
+check('a body with no scale at all is no answer',
+      ab._effective({'workers': []}) is None and ab._effective(None) is None)
+
 shutdown()
 print('\n' + (f'ALL PASS ({len(results)})' if all(results)
               else f'FAILURES: {results.count(False)} / {len(results)}'))

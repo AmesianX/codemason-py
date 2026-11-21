@@ -97,6 +97,50 @@ def _endpoint():
     return base + '/ab', (cfg.model_api_key or '')
 
 
+def _effective(body):
+    """The scale the server will actually apply, read out of an ``/ab`` body.
+
+    Returns ``(scale, consistent)`` or None.
+
+    The lane's switch went per-token (``ab_switch.py``): the value that reaches
+    the forward pass is ``_default_scale``, which ``fill_token_scales`` writes
+    into the step's vector for every request that did not send its own
+    ``ab_scale``, and which the server mirrors into each worker's
+    ``details[].default_scale``. The top-level ``scale`` is ``get_scale()`` --
+    the legacy scalar ``_scale``, which ``_token_scale()`` stops allocating the
+    moment the per-token buffer is reserved, so it reads 0.0 for the life of the
+    process.
+
+    Reading that field printed ``server: off (restored)`` over a server holding
+    the edit ON (measured 2026-11-21: ``POST {"scale":1}`` answered
+    ``{"scale":1.0,"mode":"abliterated"}``, the GET right after it answered
+    ``{"scale":0.0,"mode":"original","details":[{"default_scale":1.0,..}]}``).
+    It is the mirror image of the 2026-11-20 bug: the display said ``on`` over a
+    server at 0.0, the fix was to believe the server rather than ``_pushed``,
+    and the field we started believing had quietly stopped meaning anything.
+
+    ``consistent`` has the same hole -- the server derives it from those
+    always-zero scalars, so ranks holding different defaults still look agreed.
+    Compare the per-worker defaults instead.
+
+    A body without ``per_token`` is a server from before that change (or another
+    server entirely), and there the top-level pair is the right answer.
+    """
+    if not isinstance(body, dict):
+        return None
+    if body.get('per_token'):
+        details = body.get('details')
+        if isinstance(details, list):
+            defaults = [float(d['default_scale']) for d in details
+                        if isinstance(d, dict) and d.get('default_scale') is not None]
+            if defaults:
+                head = defaults[0]
+                return head, all(abs(s - head) <= 1e-6 for s in defaults)
+    if body.get('scale') is None:
+        return None
+    return float(body['scale']), bool(body.get('consistent', True))
+
+
 async def _push(scale, force=False):
     """Push a scale, skipping the request when the server already has it.
 
@@ -142,16 +186,17 @@ async def _push(scale, force=False):
     # {"scale":..,"workers":[..],"consistent":bool}; anything else (a different
     # server, an empty 200) leaves us with no confirmation, so record none and
     # let the next push go out rather than be skipped.
+    # Through ``_effective``, so a POST that ever grows the per-token
+    # diagnostics is read the same way the GET is. On today's reply
+    # (scale/workers/consistent/mode) it is the top-level pair, unchanged.
     served = None
     consistent = True
     try:
-        body = resp.json()
-        if isinstance(body, dict):
-            if body.get('scale') is not None:
-                served = float(body['scale'])
-            consistent = bool(body.get('consistent', True))
+        pair = _effective(resp.json())
     except Exception:
-        served = None
+        pair = None
+    if pair is not None:
+        served, consistent = pair
     with _lock:
         _pushed = served
     if served is not None and abs(served - scale) > 1e-6:
@@ -257,7 +302,6 @@ async def query():
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(url, headers=headers)
-        body = resp.json()
-        return float(body['scale']), bool(body.get('consistent', True))
+        return _effective(resp.json())
     except Exception:
         return None
