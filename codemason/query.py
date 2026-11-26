@@ -20,6 +20,7 @@ from .types.query import (
 )
 from .tools.base import Tool, ToolResult
 from .services.backend import query_model
+from .services import _openai_common as _oc_priority
 from .utils.log import debug_log
 from .utils.messages import (
     create_user_message,
@@ -771,6 +772,11 @@ async def query(
             **({'max_tokens': _sub_max}
                if getattr(tool_use_context, 'agent_id', None) is not None
                and (_sub_max := int(getattr(_get_config_mt(), 'subagent_max_tokens', 0) or 0)) > 0
+               else {}),
+            # Sub-agents yield to the main conversation in the server's waiting
+            # queue (vLLM --scheduling-policy priority).
+            **({'priority': _oc_priority.SUBAGENT_PRIORITY}
+               if getattr(tool_use_context, 'agent_id', None) is not None
                else {}),
         },
         on_token_update=tool_use_context.on_token_update,

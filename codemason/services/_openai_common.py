@@ -1192,6 +1192,26 @@ def _merge_consecutive_assistants(messages: List[ChatMessage]) -> List[ChatMessa
 # See the comment at the build site for why this must not be recomputed.
 _TOOL_BLOCK_CACHE: Dict[str, List[Dict[str, Any]]] = {}
 
+# vLLM scheduling priority for sub-agent requests (lower = served first; the
+# server default is 0). With `--scheduling-policy priority` a waiting main
+# conversation is admitted before waiting sub-agents. The main conversation,
+# compaction and helper calls send no key at all.
+SUBAGENT_PRIORITY = 1
+
+# Set once a server has refused the `priority` field. vLLM documents that a
+# non-zero priority is an error unless the server schedules by priority; this
+# deployment accepts and ignores it, but another server may not. After one
+# refusal the key is not sent again for the rest of the process.
+_PRIORITY_REJECTED = False
+
+
+def _wire_priority(priority: Optional[int], vllm_backend: bool) -> Optional[int]:
+    """The `priority` value to send, if any: vLLM backend only (llama.cpp has
+    no such field) and only while no server has refused it."""
+    if vllm_backend and not _PRIORITY_REJECTED:
+        return priority
+    return None
+
 
 async def query_openai_compatible(
     messages: List[Union[UserMessage, AssistantMessage]],
@@ -1544,6 +1564,11 @@ async def query_openai_compatible(
         if _rd:
             request_body['repetition_detection'] = _rd
 
+        # Request priority (vLLM only, until a server refuses it).
+        _wire_p = _wire_priority(options.get('priority'), continuous_usage_stats)
+        if _wire_p is not None:
+            request_body['priority'] = _wire_p
+
         debug_log('REQUEST BODY', request_body)
 
         # Make streaming request
@@ -1683,6 +1708,24 @@ async def query_openai_compatible(
             ) as response:
                 if response.status_code != 200:
                     error_text = await response.aread()
+                    # A server that does not schedule by priority may refuse
+                    # the field. Stop sending it and ask again once, rather
+                    # than failing the sub-agent outright.
+                    if (_wire_p is not None and response.status_code == 400
+                            and 'priority' in error_text.decode('utf-8', errors='replace').lower()):
+                        global _PRIORITY_REJECTED
+                        _PRIORITY_REJECTED = True
+                        log_error('server refused the request priority field; '
+                                  'sending without it from now on',
+                                  'openai_common: priority')
+                        return await query_openai_compatible(
+                            messages, system_prompt, tools, signal, options,
+                            on_token_update, on_content_delta, on_thinking_update,
+                            continuous_usage_stats=continuous_usage_stats,
+                            max_images=max_images,
+                            repetition_detection=repetition_detection,
+                            reasoning_roundtrip=reasoning_roundtrip,
+                        )
                     # A rejected auth with no key configured is the one failure
                     # whose status alone hides the cause: the request went out
                     # with no Authorization header at all, so the server is
