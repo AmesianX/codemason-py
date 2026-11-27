@@ -1259,6 +1259,40 @@ def _wire_vllm_xargs(ab_scale: Optional[float], vllm_backend: bool,
     return x or None
 
 
+# The previous request OF THE SAME CONVERSATION, keyed by its first message
+# (the system prompt) -- a WebSearch query planner or a sub-agent in between
+# must not read as a break of the main conversation. Rust parity
+# (openai_common.rs prefix tracker).
+_prev_by_conv: dict = {}
+
+
+def _prefill_expectation(request_body: dict):
+    """(new_input, client_cold, expected_prompt) in tokens for this request."""
+    import hashlib
+    msgs = request_body.get('messages') or []
+    dumps = [json.dumps(m, ensure_ascii=False, sort_keys=True) for m in msgs]
+    now = [(hashlib.sha1(d.encode()).hexdigest(), len(d)) for d in dumps]
+    key = now[0][0] if now else ''
+    if len(_prev_by_conv) > 64 and key not in _prev_by_conv:
+        _prev_by_conv.clear()
+    prev = _prev_by_conv.get(key, [])
+
+    def tok(a: int, b: int) -> int:
+        return count_tokens_precise(''.join(dumps[a:b])) if b > a else 0
+
+    if not prev:
+        last_asst = max((i for i, m in enumerate(msgs) if m.get('role') == 'assistant'), default=-1)
+        new_from, client_cold = last_asst + 1, 0
+    else:
+        diverge = next((i for i, (x, y) in enumerate(zip(prev, now)) if x != y), min(len(prev), len(now)))
+        new_from = len(prev)
+        client_cold = tok(diverge, len(prev)) if diverge < len(prev) else 0
+    _prev_by_conv[key] = now
+    tools = request_body.get('tools') or []
+    tools_tokens = count_tokens_precise(json.dumps(tools, ensure_ascii=False)) if tools else 0
+    return tok(new_from, len(msgs)), client_cold, tok(0, len(msgs)) + tools_tokens
+
+
 async def query_openai_compatible(
     messages: List[Union[UserMessage, AssistantMessage]],
     system_prompt: List[str],
@@ -1620,6 +1654,12 @@ async def query_openai_compatible(
                                   len(system_prompt_messages(system_prompt)) > 1)
         if _xargs is not None:
             request_body['vllm_xargs'] = _xargs
+
+        # New input vs. cold re-read: the spinner shows only the cold part.
+        try:
+            _tokens_mod.set_prefill_expectation(*_prefill_expectation(request_body))
+        except Exception:  # noqa: BLE001 - a display estimate must never fail a request
+            pass
 
         debug_log('REQUEST BODY', request_body)
 

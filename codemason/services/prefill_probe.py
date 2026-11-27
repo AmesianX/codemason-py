@@ -87,19 +87,28 @@ async def _probe():
         q, h = cur
         if q > q0:
             queried, cached = q - q0, h - h0
+            # The counters are server-wide: a delta far from our own prompt size
+            # is someone else's request. Take it as the new baseline and keep
+            # waiting for ours rather than show a stranger's prefill (2026-11-27).
+            expected = _tokens.expected_prompt_tokens()
+            if expected > 0 and not (0.7 * expected <= queried <= 1.3 * expected):
+                q0, h0 = q, h
+                continue
             compute = queried - cached
             _tokens.set_pending_prefill_measured(compute, cached)
+            cold, _ = _tokens.cold_prefill()
             hit = (100.0 * cached / queried) if queried else 100.0
             # A cold or badly-degraded prefix is the single most expensive
             # thing that happens without saying so. Record it where an
             # unattended run leaves a trace: at ~1,335 tok/s a 73k re-read is
             # 55 seconds of silence that otherwise looks like a hang, and
             # afterwards nothing in the transcript says it happened.
-            if compute > 20000 and hit < 50.0:
+            if cold > 20000:
                 log_error(
-                    'cold prefill: %d of %d prompt tokens must be recomputed '
-                    '(%.1f%% served from cache) — about %.0fs before the first token'
-                    % (compute, queried, hit, compute / PREFILL_TOKENS_PER_SEC),
+                    'cold prefill: %d already-sent tokens must be recomputed '
+                    '(%d computed of %d, %.1f%% served from cache) — about %.0fs '
+                    'before the first token'
+                    % (cold, compute, queried, hit, cold / PREFILL_TOKENS_PER_SEC),
                     'prefill_probe: vllm /metrics',
                 )
             debug_log('PREFILL', {'queried': queried, 'cached': cached,

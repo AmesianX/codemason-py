@@ -501,6 +501,10 @@ class StreamingSpinner:
     # deployment (1,335 tok/s) this is roughly 15 seconds before the first token
     # -- about where an unexplained spinner starts reading as a hang.
     PREFILL_NOTEWORTHY_TOKENS = 20_000
+    # COLD prefill worth showing. KDA checkpoints sit on a 4,608-token grid plus
+    # a 512 tail, so up to ~5k of a warm request is recomputed by design; past
+    # 8k it is a real break (2026-11-27, Rust parity).
+    COLD_NOTEWORTHY_TOKENS = 8_192
 
     def _prefill_segment(self) -> str:
         """' · ↑ 73.1k to prefill' while the server is still reading the prompt
@@ -522,29 +526,26 @@ class StreamingSpinner:
         # line. -dbg brings it back, along with turns.log.
         if self.token_count > 0:
             return ''
+        # Only COLD prefill is news: input this conversation already sent that
+        # the server must compute again (a broken prefix, a restart, a resumed
+        # session). New input -- a 30k-character WebSearch result, the next
+        # question -- is read on every request and used to show up here as
+        # "to prefill", indistinguishable from a break (2026-11-27).
         from .utils import tokens as _tk
-        p = _tk.pending_prefill()
-        if p <= 0:
-            return ''
-        # Under -dbg: always, as a diagnostic. Otherwise only when the wait is
-        # the PROMPT and not the model, which is the one case where silence is
-        # indistinguishable from a freeze.
-        #
-        # The clean-line argument above still holds for ordinary turns, and they
-        # stay clean: a warm request re-reads a few thousand tokens and never
-        # crosses the bar. What it did not cover is a reduction clearing an
-        # early tool result, which invalidates every cached token after it: in
-        # the Rust port on 2026-10-03 17:55 that was 242,795 tokens at 0.0%
-        # cache hit and 182 seconds before the first token, spent showing the
-        # turn's own label and no reason at all.
         from .utils.log import debug_enabled
-        if not debug_enabled() and p < self.PREFILL_NOTEWORTHY_TOKENS:
-            return ''
+        cold, measured = _tk.cold_prefill()
+        new_input = _tk.new_input_tokens()
         cached = _tk.pending_cached()
-        mark = '' if _tk.prefill_is_measured() else '~'
-        hit = f", {format_tokens_compact(cached)} cached" if cached > 0 else ''
-        return (f" {sym('dot')} {sym('up')} {mark}"
-                f"{format_tokens_compact(p)} to prefill{hit}")
+        mark = '' if measured else '~'
+        if debug_enabled():
+            if cold <= 0 and new_input <= 0:
+                return ''
+            hit = f", {format_tokens_compact(cached)} cached" if cached > 0 else ''
+            return (f" {sym('dot')} {sym('up')} {format_tokens_compact(new_input)} new"
+                    f" · ⟲ {mark}{format_tokens_compact(cold)} re-read{hit}")
+        if cold < self.COLD_NOTEWORTHY_TOKENS:
+            return ''
+        return f" {sym('dot')} ⟲ {mark}{format_tokens_compact(cold)} re-read"
 
     def toolbar_text(self) -> str:
         """Status line for the interactive prompt's bottom_toolbar (the

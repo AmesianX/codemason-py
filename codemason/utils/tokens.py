@@ -890,6 +890,40 @@ _pending_prefill = 0
 _pending_cached = 0
 _prefill_measured = False   # True once the number came from the server
 _output_started = False
+# New input (sent for the first time: what was appended since the previous
+# request of the same conversation), the re-read the client can see on its own
+# (earlier messages that changed), and our estimate of the whole prompt (to
+# tell the server's global counters from someone else's request). Rust parity.
+_new_input = 0
+_client_cold = 0
+_expected_prompt = 0
+
+
+def set_prefill_expectation(new_input: int, client_cold: int, expected_prompt: int) -> None:
+    global _new_input, _client_cold, _expected_prompt
+    _new_input = max(0, int(new_input))
+    _client_cold = max(0, int(client_cold))
+    _expected_prompt = max(0, int(expected_prompt))
+
+
+def new_input_tokens() -> int:
+    return _new_input
+
+
+def expected_prompt_tokens() -> int:
+    return _expected_prompt
+
+
+def cold_prefill():
+    """(tokens, measured): COLD prefill -- input this conversation already
+    sent that the server must compute again (a broken cached prefix, a restart,
+    a resumed session). The only prefill worth showing; the new input is read
+    on every request. Measured: computed - new input (also catches breaks the
+    client cannot see: the chat template re-rendering earlier turns, a cache
+    namespace miss). Otherwise the client's own count."""
+    if _prefill_measured:
+        return max(0, _pending_prefill - _new_input), True
+    return _client_cold, False
 
 
 def set_pending_prefill(tokens: int) -> None:
@@ -914,10 +948,14 @@ def reset_prefill_state() -> None:
     """Call at the start of every request: the previous turn's numbers must not
     leak into this one's display."""
     global _pending_prefill, _pending_cached, _prefill_measured, _output_started
+    global _new_input, _client_cold, _expected_prompt
     _pending_prefill = 0
     _pending_cached = 0
     _prefill_measured = False
     _output_started = False
+    _new_input = 0
+    _client_cold = 0
+    _expected_prompt = 0
 
 
 def mark_output_started() -> None:
