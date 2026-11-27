@@ -4493,6 +4493,7 @@ def print_help(tools: Optional[List[Any]] = None):
   /goal check   - run the completion gates and report pass/fail
   /keepgoing    - /keepgoing on|off|status
   /language     - UI language: /language (show) or /language Korean|ko|한국어
+  /ab           - refusal edit: /ab (show) or /ab off|on|auto (auto = on only for the turn that accepts)
   /expand       - Print the last 3 tool outputs in full into the chat
   /expand N     - Same, but the last N outputs
   /export       - Save the conversation to a Markdown file (./codemason-export-<id>.md)
