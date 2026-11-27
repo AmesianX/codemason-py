@@ -22,8 +22,8 @@ check("앞이 비면 분할 안 함", oc.system_prompt_messages([M, "env"]) == [
 check("뒤가 비면 분할 안 함", oc.system_prompt_messages(["intro", M]) == ["intro"])
 check("기존 결합 함수도 표지 제거", oc.build_system_prompt_with_cwd_emphasis(["a", M, "b"]) == "a\n\nb")
 check("공유 동의는 vLLM 에만",
-      oc._wire_vllm_xargs(0.0, True, True) == {"ab_scale": 0, "cache_share_system_prefix": True})
-check("ab 없이도 공유 동의", oc._wire_vllm_xargs(None, True, True) == {"cache_share_system_prefix": True})
+      oc._wire_vllm_xargs(0.0, True, True) == {"ab_scale": 0, "cache_share_system_prefix": 1})
+check("ab 없이도 공유 동의", oc._wire_vllm_xargs(None, True, True) == {"cache_share_system_prefix": 1})
 check("llama.cpp 는 never", oc._wire_vllm_xargs(None, False, True) is None)
 check("기존 ab 동작 유지", oc._wire_vllm_xargs(1.0, True) == {"ab_scale": 1})
 

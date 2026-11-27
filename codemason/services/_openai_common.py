@@ -1252,8 +1252,10 @@ def _wire_vllm_xargs(ab_scale: Optional[float], vllm_backend: bool,
             x['ab_scale'] = 1 if v > 0 else 0
     # Our leading system message is public (identical for every user): the
     # server may share its cache across sessions. See PRIVATE_CONTEXT_MARKER.
+    # 1, not True: vLLM's vllm_xargs schema (str | int | float) coerces a JSON
+    # bool to an int anyway, and the server checks for exactly 1.
     if share_system_prefix:
-        x['cache_share_system_prefix'] = True
+        x['cache_share_system_prefix'] = 1
     return x or None
 
 
