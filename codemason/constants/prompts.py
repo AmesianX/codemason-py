@@ -999,6 +999,19 @@ async def load_memory_prompt() -> Optional[str]:
 
 # === Main assembly ===
 
+# Where the system prompt stops being the same for every user. Sections before
+# it (instructions, tool usage, vision) are identical in every codemason
+# session of the same version; sections after it (memory, environment, operator
+# directive, ...) are this user's own. The wire layer sends the two halves as
+# separate system messages and asks the server to share only the first
+# (vllm_xargs.cache_share_system_prefix): with a per-session cache salt the
+# public half -- tool schema included -- is served from one shared cache entry
+# and everything private stays in this session's own namespace. The server
+# decides the boundary from the tokens; this marker only says where our own
+# public part ends. It never reaches the model. (Rust parity: PRIVATE_CONTEXT_MARKER.)
+PRIVATE_CONTEXT_MARKER = "\x00codemason:private-context\x00"
+
+
 async def get_system_prompt(
     tools: Optional[Sequence[object]] = None,
     model: Optional[str] = None,
@@ -1029,6 +1042,7 @@ async def get_system_prompt(
         get_session_specific_guidance_section(enabled_tools, config),
         get_background_callback_section(enabled_tools),
         get_vision_section(enabled_limit()),
+        PRIVATE_CONTEXT_MARKER,
         await load_memory_prompt(),
         compute_simple_env_info(model, additional_working_directories),
         # Language section is driven by the user's configured preferred language
@@ -1079,7 +1093,7 @@ async def get_agent_prompt(
     """Port of DEFAULT_AGENT_PROMPT + enhanceSystemPromptWithEnvDetails."""
     model = model or get_config().model_name
     env_info = compute_env_info(model, additional_working_directories)
-    return [DEFAULT_AGENT_PROMPT, _AGENT_NOTES, env_info]
+    return [DEFAULT_AGENT_PROMPT, _AGENT_NOTES, PRIVATE_CONTEXT_MARKER, env_info]
 
 
 # === Sub-agent prefix ===
@@ -1136,7 +1150,7 @@ def agent_prefix_sections(model_id: str) -> List[str]:
     vision = get_vision_section(known_limit())
     if _agent_prefix_sections is None or _agent_prefix_sections[0] != vision:
         from ..utils.language import session_language
-        sections = [_AGENT_NOTES, compute_env_info(model_id)]
+        sections = [_AGENT_NOTES, PRIVATE_CONTEXT_MARKER, compute_env_info(model_id)]
         if vision:
             sections.append(vision)
         lang = get_language_section(session_language())

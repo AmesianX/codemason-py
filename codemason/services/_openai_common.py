@@ -560,7 +560,25 @@ def build_system_prompt_with_cwd_emphasis(system_prompt: List[str]) -> str:
     Do not put it back. Anything that varies within a session belongs after the
     history, never before it.
     """
-    return '\n\n'.join(system_prompt)
+    return '\n\n'.join(s for s in system_prompt if not _is_private_marker(s))
+
+
+def _is_private_marker(section) -> bool:
+    from ..constants.prompts import PRIVATE_CONTEXT_MARKER
+    return section == PRIVATE_CONTEXT_MARKER
+
+
+def system_prompt_messages(system_prompt: List[str]) -> List[str]:
+    """The system prompt as the system messages to send: one, or two when it
+    carries PRIVATE_CONTEXT_MARKER -- the public half (identical for every user
+    of this version) and the private half (memory, environment, ...). Two
+    messages render as two <|system|> blocks, the boundary the server shares
+    the public half up to (cache_share_system_prefix). Rust parity."""
+    at = next((i for i, s in enumerate(system_prompt) if _is_private_marker(s)), None)
+    if at is not None and 0 < at < len(system_prompt) - 1:
+        return ['\n\n'.join(system_prompt[:at]),
+                '\n\n'.join(s for s in system_prompt[at + 1:] if not _is_private_marker(s))]
+    return [build_system_prompt_with_cwd_emphasis(system_prompt)]
 
 
 # === Chat Message Types ===
@@ -792,10 +810,11 @@ def convert_to_chat_messages(
         attached.append((n, label, part, block))
         return [label, part]
 
-    # Add system prompt with cwd emphasis
+    # System prompt: public half and private half as separate system messages
+    # when the marker is present (system_prompt_messages).
     if system_prompt:
-        full_system_prompt = build_system_prompt_with_cwd_emphasis(system_prompt)
-        chat_messages.append(ChatMessage(role='system', content=full_system_prompt))
+        for content in system_prompt_messages(system_prompt):
+            chat_messages.append(ChatMessage(role='system', content=content))
 
     debug_log('CONVERTING MESSAGES', {
         'total_messages': len(messages),
@@ -1213,22 +1232,29 @@ def _wire_priority(priority: Optional[int], vllm_backend: bool) -> Optional[int]
     return None
 
 
-def _wire_vllm_xargs(ab_scale: Optional[float], vllm_backend: bool) -> Optional[dict]:
+def _wire_vllm_xargs(ab_scale: Optional[float], vllm_backend: bool,
+                     share_system_prefix: bool = False) -> Optional[dict]:
     """The ``vllm_xargs`` object for this request, if any: the /ab edit for
     THIS request only (see services/ab.py). vLLM backend only -- llama.cpp has
     no such field. The server validates the value itself and runs anything that
     is not a finite number in [0, 1] on the original weights; this side sends
     only 0 or 1 anyway. ``None`` (compaction, helper calls) sends no key and
     gets the server default, the original weights."""
-    if ab_scale is None or not vllm_backend:
+    if not vllm_backend:
         return None
-    try:
-        v = float(ab_scale)
-    except (TypeError, ValueError):
-        return None
-    if v != v or v in (float('inf'), float('-inf')):
-        return None
-    return {'ab_scale': 1 if v > 0 else 0}
+    x: dict = {}
+    if ab_scale is not None:
+        try:
+            v = float(ab_scale)
+        except (TypeError, ValueError):
+            v = float('nan')
+        if v == v and v not in (float('inf'), float('-inf')):
+            x['ab_scale'] = 1 if v > 0 else 0
+    # Our leading system message is public (identical for every user): the
+    # server may share its cache across sessions. See PRIVATE_CONTEXT_MARKER.
+    if share_system_prefix:
+        x['cache_share_system_prefix'] = True
+    return x or None
 
 
 async def query_openai_compatible(
@@ -1360,7 +1386,7 @@ async def query_openai_compatible(
                 # py_json_dumps produces, so both trees register one number.
                 _oob += count_tokens_precise(json.dumps(tool_schemas))
             if system_prompt:
-                _oob += count_tokens_precise('\n\n'.join(system_prompt))
+                _oob += count_tokens_precise('\n\n'.join(system_prompt_messages(system_prompt)))
             set_out_of_band_tokens(_tool_key, _oob)
         except Exception as _e:  # noqa: BLE001 — an estimate must not block a request
             # Logged, never swallowed. A bare `pass` here hid a NameError for
@@ -1588,7 +1614,8 @@ async def query_openai_compatible(
             request_body['priority'] = _wire_p
 
         # The /ab edit, per request (vLLM only). See _wire_vllm_xargs.
-        _xargs = _wire_vllm_xargs(options.get('ab_scale'), continuous_usage_stats)
+        _xargs = _wire_vllm_xargs(options.get('ab_scale'), continuous_usage_stats,
+                                  len(system_prompt_messages(system_prompt)) > 1)
         if _xargs is not None:
             request_body['vllm_xargs'] = _xargs
 
@@ -1692,6 +1719,11 @@ async def query_openai_compatible(
                 BodyCryptoError as _BCErr,
             )
             _aes_key = _bc_load(cfg.model_aes_key)
+        if _aes_key is not None and continuous_usage_stats:
+            # The gateway derives this session's cache salt from it and removes
+            # it; it only ever travels inside the encrypted body.
+            from ..utils.cache_session import session_id as _cache_session_id
+            request_body['cache_session'] = _cache_session_id()
         if _aes_key is not None:
             _stream_kwargs = dict(
                 content=_bc_enc(_aes_key, json.dumps(request_body)).encode('ascii'),
