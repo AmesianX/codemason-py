@@ -1213,6 +1213,24 @@ def _wire_priority(priority: Optional[int], vllm_backend: bool) -> Optional[int]
     return None
 
 
+def _wire_vllm_xargs(ab_scale: Optional[float], vllm_backend: bool) -> Optional[dict]:
+    """The ``vllm_xargs`` object for this request, if any: the /ab edit for
+    THIS request only (see services/ab.py). vLLM backend only -- llama.cpp has
+    no such field. The server validates the value itself and runs anything that
+    is not a finite number in [0, 1] on the original weights; this side sends
+    only 0 or 1 anyway. ``None`` (compaction, helper calls) sends no key and
+    gets the server default, the original weights."""
+    if ab_scale is None or not vllm_backend:
+        return None
+    try:
+        v = float(ab_scale)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float('inf'), float('-inf')):
+        return None
+    return {'ab_scale': 1 if v > 0 else 0}
+
+
 async def query_openai_compatible(
     messages: List[Union[UserMessage, AssistantMessage]],
     system_prompt: List[str],
@@ -1568,6 +1586,11 @@ async def query_openai_compatible(
         _wire_p = _wire_priority(options.get('priority'), continuous_usage_stats)
         if _wire_p is not None:
             request_body['priority'] = _wire_p
+
+        # The /ab edit, per request (vLLM only). See _wire_vllm_xargs.
+        _xargs = _wire_vllm_xargs(options.get('ab_scale'), continuous_usage_stats)
+        if _xargs is not None:
+            request_body['vllm_xargs'] = _xargs
 
         debug_log('REQUEST BODY', request_body)
 

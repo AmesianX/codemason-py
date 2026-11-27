@@ -1,11 +1,15 @@
-"""The /ab auto lifecycle, against a stub server.
+"""/ab, per request, against a stub server.
 
-Mirrors services/ab.rs's hook_tests. The failure this guards is the switch left
-on after the turn that armed it, which `auto` exists to prevent and which is
-invisible by inspection. Note that NO tool call appears anywhere below: the off
-used to hang off one, and turns that never call a tool (a text answer, an empty
-turn, an abort, a cut generation) left the server abliterated -- see the
-services/ab.py docstring for the 2026-10-01 incident.
+Mirrors services/ab.rs's hook_tests. Two things are guarded:
+
+1. Zero trust (2026-11-27): the client never writes the server's switch.
+   `POST /ab` set the engine-wide default, which every request without its own
+   scale follows, so one client's `/ab on` changed every other client's model
+   (measured on the live lane). The server now answers 410; the client must not
+   send it either. The edit rides on the request: `vllm_xargs.ab_scale`.
+2. `auto` gives the edit to the turn's first request only -- and NO tool call
+   appears anywhere below: the old off hung off one, and turns that never call
+   a tool left the server abliterated (the 2026-10-01 incident in ab.py).
 
 Run: python3 tests/test_ab_switch.py
 """
@@ -43,19 +47,23 @@ def check(name, ok, detail=None):
 
 
 def start_stub():
-    """Records every scale posted to /ab. Returns (list, port, shutdown)."""
+    """Records every request that reaches the stub. Returns (list, port, shutdown)."""
     seen = []
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
-            seen.append(body['scale'])
-            payload = json.dumps(body).encode()
+        def _any(self):
+            n = int(self.headers.get('Content-Length', 0) or 0)
+            raw = self.rfile.read(n) if n else b''
+            seen.append((self.command, self.path, raw.decode(errors='replace')))
+            payload = b'{}'
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+
+        do_POST = _any
+        do_PUT = _any
 
         def log_message(self, *args):
             pass
@@ -71,62 +79,59 @@ def point_at(port):
         model_api_key = ''
 
     ab.get_config = lambda: Cfg()
-    ab._pushed = None
     ab._armed = False
     ab._mode = ab.OFF
+
+
+def set_mode(m):
+    """set_mode, whether it is a coroutine (before 11-27) or not."""
+    r = ab.set_mode(m)
+    if asyncio.iscoroutine(r):
+        asyncio.run(r)
 
 
 seen, port, shutdown = start_stub()
 point_at(port)
 
+# --- 1. changing the mode never writes the server ----------------------------
+# Failed on the code before 11-27: every set_mode POSTed {"scale":..}.
+for m in (ab.ON, ab.OFF, ab.AUTO, ab.ON, ab.AUTO):
+    set_mode(m)
+    asyncio.run(ab.on_user_turn())
+    if hasattr(ab, 'request_scale'):
+        ab.request_scale()
+        ab.request_scale()
+check('changing the mode never writes the server', seen == [], seen)
 
-async def auto_lifecycle():
-    await ab.set_mode(ab.AUTO)        # entering auto parks it off
-    await ab.on_user_turn()           # arms only -- must cost no request
-    after_arming = list(seen)
-    on = await ab.begin_request()     # 1.0
-    await ab.end_request(on)          # 0.0 -- and no tool call to get here
-    # Later requests of the same turn: the latch is spent, so the switch is not
-    # touched. These stand in for the repetition retries that used to go out on
-    # the edited weights because the off waited for a tool call they never made.
-    laters = [await _pair() for _ in range(3)]
-    return after_arming, on, laters
+# --- 2. auto: the turn's first request only ----------------------------------
+set_mode(ab.AUTO)
+got = []
+got.append(ab.request_scale())          # before any user turn
+asyncio.run(ab.on_user_turn())
+got += [ab.request_scale() for _ in range(3)]
+asyncio.run(ab.on_user_turn())
+got += [ab.request_scale() for _ in range(2)]
+check("auto: 1 for the turn's first request, explicit 0 for every other",
+      got == [0.0, 1.0, 0.0, 0.0, 1.0, 0.0], got)
 
+# --- 3. on / off pin every request; a user turn does not arm them ------------
+set_mode(ab.ON)
+asyncio.run(ab.on_user_turn())
+on = [ab.request_scale() for _ in range(3)]
+set_mode(ab.OFF)
+asyncio.run(ab.on_user_turn())
+off = [ab.request_scale() for _ in range(2)]
+check('on pins 1 on every request', on == [1.0, 1.0, 1.0], on)
+check('off pins 0 on every request', off == [0.0, 0.0], off)
 
-async def _pair():
-    again = await ab.begin_request()
-    await ab.end_request(again)
-    return again
-
-
-after_arming, turned_on, laters = asyncio.run(auto_lifecycle())
-check('auto: arming the turn costs no request', after_arming == [0.0], after_arming)
-check("auto: on for the turn's first request", turned_on is True)
-check('auto: off as soon as it answers, with no tool call involved',
-      seen == [0.0, 1.0, 0.0], seen)
-check('auto: every later request of the turn is left alone',
-      laters == [False, False, False], laters)
-
-seen.clear()
-# Fresh state: otherwise the skip-if-already-there cache from the run above
-# swallows this one's first push, and the test would assert the cache rather
-# than the mode's behaviour.
-ab._pushed = None
-ab._armed = False
-
-
-async def off_lifecycle():
-    await ab.set_mode(ab.OFF)
-    await ab.on_user_turn()
-    on = await ab.begin_request()
-    await ab.end_request(on)
-    return on
-
-
-on_while_pinned_off = asyncio.run(off_lifecycle())
-check('off: parks the server off once and never touches it again',
-      seen == [0.0], seen)
-check('off: the request pair is a no-op', on_while_pinned_off is False)
+# --- 4. a mode typed mid-turn drops the pending arm --------------------------
+set_mode(ab.AUTO)
+asyncio.run(ab.on_user_turn())
+set_mode(ab.OFF)
+a = ab.request_scale()
+set_mode(ab.AUTO)
+b = ab.request_scale()
+check('a mode typed mid-turn wins over the old arm', (a, b) == (0.0, 0.0), (a, b))
 
 check('parse_mode takes the three modes', (
     ab.parse_mode('auto') == ab.AUTO
@@ -135,76 +140,16 @@ check('parse_mode takes the three modes', (
 ))
 check('parse_mode rejects anything else', ab.parse_mode('maybe') is None)
 
-# --- an explicit mode command is never answered from the cache --------------
-# `_pushed` is a memo about state we do not own and cannot invalidate: the
-# server restarting or another client pushing rots it. With a rotten memo,
-# `/ab on` used to return success without sending a byte and print "on" while
-# the server sat at 0.0 -- and in ON mode begin_request() returns immediately,
-# so nothing ever pushed 1.0 again. Permanently stuck, under an honest-looking
-# display. Plant the rotten belief and require the push anyway.
-seen.clear()
-ab._armed = False
-ab._pushed = 1.0                      # we believe the server is already on
-err = asyncio.run(ab.set_mode(ab.ON))
-check('a user-typed /ab on is sent even when we think it is already on',
-      seen == [1.0] and err is None, (seen, err))
-
-# --- pinning the edit mid-turn survives that turn ending --------------------
-# The off is armed by begin_request() under the mode that held when the request
-# STARTED, and the mode can change while it is in flight. Undoing a pin the
-# user has since asked for is how the switch ended up stuck off while the REPL
-# said "on".
-seen.clear()
-ab._pushed = None
-ab._armed = False
-
-
-async def pin_mid_turn():
-    await ab.set_mode(ab.AUTO)        # parks off
-    await ab.on_user_turn()           # arms
-    on = await ab.begin_request()     # 1.0 -- request now in flight
-    await ab.set_mode(ab.ON)          # user pins it mid-turn
-    await ab.end_request(on)          # must NOT stomp the pin
-    return on
-
-
-pinned = asyncio.run(pin_mid_turn())
-check('pinning on mid-turn survives that turn ending',
-      pinned is True and seen[-1] == 1.0, seen)
-
-# --- the memo records what the server took, not what we asked for -----------
-# A server that answers with a different scale (another client raced us, or it
-# is not our /ab at all) must not leave us believing our own number: the next
-# push would be skipped as already-there.
-lying = []
-
-
-class Lying(BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
-        lying.append(body['scale'])
-        payload = json.dumps({'scale': 0.0, 'workers': [0.0, 0.0],
-                              'consistent': True}).encode()
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def log_message(self, *args):
-        pass
-
-
-liar = HTTPServer(('127.0.0.1', 0), Lying)
-threading.Thread(target=liar.serve_forever, daemon=True).start()
-point_at(liar.server_port)
-err = asyncio.run(ab.set_mode(ab.ON))
-check('a scale the server did not take is reported, not swallowed',
-      err is not None and 'not' in err, err)
-check('the memo holds the server\'s value, not ours', ab._pushed == 0.0, ab._pushed)
-asyncio.run(ab.set_mode(ab.ON))
-check('so the next push is not skipped as already-there', lying == [1.0, 1.0], lying)
-liar.shutdown()
+# --- 5. the wire: vllm_xargs on vLLM requests only ---------------------------
+from codemason.services import _openai_common as oc  # noqa: E402
+check('ab_scale rides as vllm_xargs on vLLM',
+      oc._wire_vllm_xargs(1.0, True) == {'ab_scale': 1}, oc._wire_vllm_xargs(1.0, True))
+check('off is said explicitly, not left to the server default',
+      oc._wire_vllm_xargs(0.0, True) == {'ab_scale': 0})
+check('compaction/helpers (None) send no key', oc._wire_vllm_xargs(None, True) is None)
+check('llama.cpp never gets it', oc._wire_vllm_xargs(1.0, False) is None)
+check('never NaN on the wire', oc._wire_vllm_xargs(float('nan'), True) is None)
+check('nothing above reached the server', seen == [], seen)
 
 
 # --- reading the server's answer -------------------------------------------
@@ -229,7 +174,7 @@ check('per-token disagreement is caught though the server says consistent',
                      'details': [{'default_scale': 1.0},
                                  {'default_scale': 0.0}]}) == (1.0, False))
 
-# A server from before the per-token change, and the POST reply, carry no
+# A server from before the per-token change carries no
 # `per_token`: the top-level pair is the answer there and must stay so.
 check('legacy body still reads the top-level pair',
       ab._effective({'scale': 1.0, 'workers': [1.0, 1.0],

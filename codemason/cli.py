@@ -2722,21 +2722,27 @@ async def _dispatch_builtin(user_input: str, messages: List[Any],
 
     if cmd == 'ab':
         from .services import ab as _ab
+
+        async def _served_line():
+            # Default the server gives a request that carries no ab_scale.
+            # Read-only: nothing here can change it (services/ab.py).
+            _served = await _ab.query()
+            if _served is None:
+                return 'server: no /ab endpoint'
+            _scale, _consistent = _served
+            _state = 'on (abliterated)' if _scale > 0 else 'off (restored)'
+            return f'server default: {_state}' + ('' if _consistent else ' — WORKERS DISAGREE')
+
         _parts = user_input.split(maxsplit=1)
         _want = _parts[1].strip() if len(_parts) > 1 else ''
         if not _want:
-            _served = await _ab.query()
-            if _served is None:
-                _line = 'server: no /ab endpoint'
-            else:
-                _scale, _consistent = _served
-                _state = 'on (abliterated)' if _scale > 0 else 'off (restored)'
-                _line = f'server: {_state}' + ('' if _consistent else ' — WORKERS DISAGREE')
             print(
-                f"/ab mode: {_ab.mode()}\n{_line}\n\n"
-                "off   leave the server alone\n"
-                "on    pin the refusal edit on — for measurement\n"
-                "auto  on for the turn's first request, off as soon as it answers (default)\n\n"
+                f"/ab mode: {_ab.mode()}\n{await _served_line()}\n\n"
+                "off   every request asks for the original weights\n"
+                "on    every request asks for the refusal edit — for measurement\n"
+                "auto  only the turn's first request asks for it (default)\n\n"
+                "Sent on each request (vllm_xargs.ab_scale) and applied to that request\n"
+                "only; the server switch is never touched, so no one else is affected.\n"
                 "The edit also costs the model its ability to say something does not exist\n"
                 "(4/60 fabrications off, 18-22/60 on), so auto keeps it off for every tool\n"
                 "result, link and diff — only the deciding turn gets it."
@@ -2746,21 +2752,8 @@ async def _dispatch_builtin(user_input: str, messages: List[Any],
         if _mode is None:
             print(f"Unknown mode: {_want}   (off | on | auto)")
             return 'handled'
-        _err = await _ab.set_mode(_mode)
-        if _err:
-            print(f"/ab mode: {_mode} — server not updated: {_err}")
-            return 'handled'
-        # Report what the SERVER holds, not what we asked for: "/ab mode: on"
-        # used to print on a push that was silently skipped as already-there,
-        # while the server sat at 0.0 (see services/ab.py).
-        _served = await _ab.query()
-        if _served is None:
-            _line = 'server: no /ab endpoint'
-        else:
-            _scale, _consistent = _served
-            _state = 'on (abliterated)' if _scale > 0 else 'off (restored)'
-            _line = f'server: {_state}' + ('' if _consistent else ' — WORKERS DISAGREE')
-        print(f"/ab mode: {_mode}\n{_line}")
+        _ab.set_mode(_mode)
+        print(f"/ab mode: {_mode} (sent per request)\n{await _served_line()}")
         return 'handled'
 
     if cmd in ('language', 'lang'):

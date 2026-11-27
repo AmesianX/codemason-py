@@ -669,8 +669,8 @@ def get_fabrication_guard_section() -> str:
     that runs on abliterated weights.
 
     services.ab runs `auto`: the turn's first request — the one that reads the
-    user and decides what to do — goes out at scale=1, and the edit is pushed
-    back off the moment that request answers. A turn that calls a tool is
+    user and decides what to do — goes out with ab_scale=1, and every request
+    after it carries ab_scale=0 (per request; no server switch since 11-27). A turn that calls a tool is
     therefore protected already: everything after the first request (judging
     tool output, links, diffs, writing the final answer) runs on the unedited
     weights, which do not fabricate. A turn that calls NO tool is not: a plain

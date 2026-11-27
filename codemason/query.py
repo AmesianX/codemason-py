@@ -717,12 +717,13 @@ async def query(
 
     # Query the model
     #
-    # `/ab auto`: the turn's first request is the one deciding whether to
-    # accept, and the only one that wants the refusal edit. On here, off as soon
-    # as it answers (below) — the two are paired inside this request, so no
-    # outcome can leave the switch on. See services/ab.py.
+    # `/ab`: this request's own ab_scale -- under `auto`, 1 for the turn's
+    # first request (the one deciding whether to accept) and 0 for every one
+    # after it, retries and sub-agents included. Carried on the request itself;
+    # nothing on the server is switched, so nothing can be left on and no other
+    # client is affected. See services/ab.py.
     from .services import ab as _ab
-    _ab_edit = await _ab.begin_request()
+    _ab_scale = _ab.request_scale()
     assistant_message = await query_model(
         messages=messages,
         system_prompt=[full_system_prompt],
@@ -778,16 +779,12 @@ async def query(
             **({'priority': _oc_priority.SUBAGENT_PRIORITY}
                if getattr(tool_use_context, 'agent_id', None) is not None
                else {}),
+            'ab_scale': _ab_scale,
         },
         on_token_update=tool_use_context.on_token_update,
         on_content_delta=tool_use_context.on_content_delta,
         on_thinking_update=getattr(tool_use_context, 'on_thinking_update', None),
     )
-    # Off, whatever came back: a tool call, a sentence, an empty turn, an abort,
-    # or a generation the degenerate guard cut. Every recursion below —
-    # repetition retries included — runs on the restored weights.
-    await _ab.end_request(_ab_edit)
-
     # Check for abort after query
     if tool_use_context.abort_controller and tool_use_context.abort_controller.is_set():
         yield create_assistant_message_obj(INTERRUPT_MESSAGE)
