@@ -27,6 +27,19 @@ check("ab 없이도 공유 동의", oc._wire_vllm_xargs(None, True, True) == {"c
 check("llama.cpp 는 never", oc._wire_vllm_xargs(None, False, True) is None)
 check("기존 ab 동작 유지", oc._wire_vllm_xargs(1.0, True) == {"ab_scale": 1})
 
+from codemason.query import (  # noqa: E402
+    format_system_prompt_with_context, system_prompt_sections_with_context)
+
+# The real path: query's sections -> wire messages. The marker must survive the
+# first step as its own section and never appear in what is sent.
+secs = system_prompt_sections_with_context(["intro", "tools", M, "memory", "env"], {"gitStatus": "clean"})
+wire = oc.system_prompt_messages(secs)
+check("실제 경로(query→전송)에서도 두 메시지", len(wire) == 2 and wire[0] == "intro\n\ntools", wire)
+check("context 는 개인 쪽", "<gitStatus>clean</gitStatus>" in wire[1])
+check("실제 경로에서도 표지가 모델에 안 감", all("\x00" not in w for w in wire))
+check("한 문자열 형식도 표지 없음",
+      "\x00" not in format_system_prompt_with_context(["a", M, "b"], {}))
+
 from codemason.utils import cache_session as cs  # noqa: E402
 sid = cs.session_id()
 check("세션 id 는 게이트웨이 형식", bool(cs._VALID.match(sid)), sid[:6] + "…")

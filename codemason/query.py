@@ -554,11 +554,16 @@ def create_assistant_message_obj(text: str) -> AssistantMessage:
     )
 
 
-def format_system_prompt_with_context(
+def system_prompt_sections_with_context(
     system_prompt: List[str],
     context: Dict[str, str]
-) -> str:
-    """Format system prompt with context"""
+) -> List[str]:
+    """The system prompt's sections with the context block appended -- NOT
+    joined: PRIVATE_CONTEXT_MARKER must reach the wire layer as its own section,
+    where the request is split into a public (shared-cache) and a private
+    system message. Joining here folded the marker into the text, so nothing
+    was split and the marker reached the model (caught live 2026-11-27). The
+    context block is this user's, so it lands in the private half. Rust parity."""
     parts = list(system_prompt)
 
     if context:
@@ -569,7 +574,17 @@ def format_system_prompt_with_context(
         if context_parts:
             parts.append("\n".join(context_parts))
 
-    return "\n\n".join(parts)
+    return parts
+
+
+def format_system_prompt_with_context(
+    system_prompt: List[str],
+    context: Dict[str, str]
+) -> str:
+    """Format system prompt with context, as one string (marker removed)."""
+    from .constants.prompts import PRIVATE_CONTEXT_MARKER
+    return "\n\n".join(s for s in system_prompt_sections_with_context(system_prompt, context)
+                       if s != PRIVATE_CONTEXT_MARKER)
 
 
 # === Main Query Function ===
@@ -708,7 +723,7 @@ async def query(
         )
         return
 
-    full_system_prompt = format_system_prompt_with_context(system_prompt, context)
+    full_system_prompt = system_prompt_sections_with_context(system_prompt, context)
 
     # Check for abort signal
     if tool_use_context.abort_controller and tool_use_context.abort_controller.is_set():
@@ -726,7 +741,7 @@ async def query(
     _ab_scale = _ab.request_scale()
     assistant_message = await query_model(
         messages=messages,
-        system_prompt=[full_system_prompt],
+        system_prompt=full_system_prompt,
         tools=tool_use_context.options.get('tools', []),
         signal=tool_use_context.abort_controller,
         options={
